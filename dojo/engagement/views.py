@@ -32,7 +32,6 @@ from django.views.decorators.vary import vary_on_cookie
 from openpyxl import Workbook
 from openpyxl.styles import Font
 
-import dojo.jira_link.helper as jira_helper
 import dojo.risk_acceptance.helper as ra_helper
 from dojo.authorization.authorization import user_has_permission_or_403
 from dojo.authorization.authorization_decorators import user_is_authorized
@@ -56,7 +55,6 @@ from dojo.finding.views import find_available_notetypes
 from dojo.forms import (
     AddFindingsRiskAcceptanceForm,
     CheckForm,
-    CredMappingForm,
     DeleteEngagementForm,
     DoneForm,
     EditRiskAcceptanceForm,
@@ -74,11 +72,11 @@ from dojo.forms import (
 )
 from dojo.importers.base_importer import BaseImporter
 from dojo.importers.default_importer import DefaultImporter
+from dojo.jira import services as jira_services
 from dojo.location.models import Location
 from dojo.location.utils import save_locations_to_add
 from dojo.models import (
     Check_List,
-    Cred_Mapping,
     Development_Environment,
     Dojo_User,
     Endpoint,
@@ -281,7 +279,7 @@ def edit_engagement(request, eid):
 
     if request.method == "POST":
         form = EngForm(request.POST, instance=engagement, cicd=is_ci_cd, product=engagement.product, user=request.user)
-        jira_project = jira_helper.get_jira_project(engagement, use_inheritance=False)
+        jira_project = jira_services.get_project(engagement, use_inheritance=False)
 
         if form.is_valid():
             # first save engagement details
@@ -307,10 +305,10 @@ def edit_engagement(request, eid):
                 "Engagement updated successfully.",
                 extra_tags="alert-success")
 
-            success, jira_project_form = jira_helper.process_jira_project_form(request, instance=jira_project, target="engagement", engagement=engagement, product=engagement.product)
+            success, jira_project_form = jira_services.process_project_form(request, instance=jira_project, target="engagement", engagement=engagement, product=engagement.product)
             error = not success
 
-            success, jira_epic_form = jira_helper.process_jira_epic_form(request, engagement=engagement)
+            success, jira_epic_form = jira_services.process_epic_form(request, engagement=engagement)
             error = error or not success
 
             if not error:
@@ -327,7 +325,7 @@ def edit_engagement(request, eid):
 
         jira_epic_form = None
         if get_system_setting("enable_jira"):
-            jira_project = jira_helper.get_jira_project(engagement, use_inheritance=False)
+            jira_project = jira_services.get_project(engagement, use_inheritance=False)
             jira_project_form = JIRAProjectForm(instance=jira_project, target="engagement", product=engagement.product)
             logger.debug("showing jira-epic-form")
             jira_epic_form = JIRAEngagementForm(instance=engagement)
@@ -471,8 +469,8 @@ class ViewEngagement(View):
             network = eng.preset.network_locations.all()
         system_settings = System_Settings.objects.get()
 
-        jissue = jira_helper.get_jira_issue(eng)
-        jira_project = jira_helper.get_jira_project(eng)
+        jissue = jira_services.get_issue(eng)
+        jira_project = jira_services.get_project(eng)
 
         try:
             check = Check_List.objects.get(engagement=eng)
@@ -485,11 +483,6 @@ class ViewEngagement(View):
         form = DoneForm()
         files = eng.files.all()
         form = TypedNoteForm(available_note_types=available_note_types) if note_type_activation else NoteForm()
-
-        creds = Cred_Mapping.objects.filter(
-            product=eng.product).select_related("cred_id").order_by("cred_id")
-        cred_eng = Cred_Mapping.objects.filter(
-            engagement=eng.id).select_related("cred_id").order_by("cred_id")
 
         add_breadcrumb(parent=eng, top_level=False, request=request)
 
@@ -513,8 +506,6 @@ class ViewEngagement(View):
                 "risks_accepted": risks_accepted,
                 "jissue": jissue,
                 "jira_project": jira_project,
-                "creds": creds,
-                "cred_eng": cred_eng,
                 "network": network,
                 "preset_test_type": preset_test_type,
             })
@@ -540,8 +531,8 @@ class ViewEngagement(View):
             network = eng.preset.network_locations.all()
         system_settings = System_Settings.objects.get()
 
-        jissue = jira_helper.get_jira_issue(eng)
-        jira_project = jira_helper.get_jira_project(eng)
+        jissue = jira_services.get_issue(eng)
+        jira_project = jira_services.get_project(eng)
 
         try:
             check = Check_List.objects.get(engagement=eng)
@@ -573,10 +564,6 @@ class ViewEngagement(View):
                                  messages.SUCCESS,
                                  "Note added successfully.",
                                  extra_tags="alert-success")
-        creds = Cred_Mapping.objects.filter(
-            product=eng.product).select_related("cred_id").order_by("cred_id")
-        cred_eng = Cred_Mapping.objects.filter(
-            engagement=eng.id).select_related("cred_id").order_by("cred_id")
 
         add_breadcrumb(parent=eng, top_level=False, request=request)
 
@@ -600,8 +587,6 @@ class ViewEngagement(View):
                 "risks_accepted": risks_accepted,
                 "jissue": jissue,
                 "jira_project": jira_project,
-                "creds": creds,
-                "cred_eng": cred_eng,
                 "network": network,
                 "preset_test_type": preset_test_type,
             })
@@ -637,15 +622,9 @@ def prefetch_for_view_tests(tests):
 @user_is_authorized(Engagement, Permissions.Test_Add, "eid")
 def add_tests(request, eid):
     eng = Engagement.objects.get(id=eid)
-    cred_form = CredMappingForm()
-    cred_form.fields["cred_user"].queryset = Cred_Mapping.objects.filter(
-        engagement=eng).order_by("cred_id")
 
     if request.method == "POST":
         form = TestForm(request.POST, engagement=eng)
-        cred_form = CredMappingForm(request.POST)
-        cred_form.fields["cred_user"].queryset = Cred_Mapping.objects.filter(
-            engagement=eng).order_by("cred_id")
         if form.is_valid():
             new_test = form.save(commit=False)
             # set default scan_type as it's used in reimport
@@ -662,19 +641,6 @@ def add_tests(request, eid):
                 eng.save()
 
             new_test.save()
-
-            # Save the credential to the test
-            if cred_form.is_valid():
-                if cred_form.cleaned_data["cred_user"]:
-                    # Select the credential mapping object from the selected list and only allow if the credential is associated with the product
-                    cred_user = Cred_Mapping.objects.filter(
-                        pk=cred_form.cleaned_data["cred_user"].id,
-                        engagement=eid).first()
-
-                    new_f = cred_form.save(commit=False)
-                    new_f.test = new_test
-                    new_f.cred_id = cred_user.cred_id
-                    new_f.save()
 
             messages.add_message(
                 request,
@@ -713,7 +679,6 @@ def add_tests(request, eid):
     return render(request, "dojo/add_tests.html", {
         "product_tab": product_tab,
         "form": form,
-        "cred_form": cred_form,
         "eid": eid,
         "eng": eng,
     })
@@ -769,30 +734,6 @@ class ImportScanResultsView(View):
             return ImportScanForm(request.POST, request.FILES, **kwargs)
         return ImportScanForm(**kwargs)
 
-    def get_credential_form(
-        self,
-        request: HttpRequest,
-        engagement: Engagement,
-    ) -> CredMappingForm:
-        """
-        Return a new instance of a form managing credentials. If an engagement
-        it present at this time any existing credential objects will be attempted
-        to be fetched to populate the form
-        """
-        if request.method == "POST":
-            return CredMappingForm(request.POST)
-        # If the engagement is not present, return an empty form
-        if engagement is None:
-            return CredMappingForm()
-        # Otherwise get all creds in the associated engagement
-        return CredMappingForm(
-            initial={
-                "cred_user_queryset": Cred_Mapping.objects.filter(
-                    engagement=engagement,
-                ).order_by("cred_id"),
-            },
-        )
-
     def get_jira_form(
         self,
         request: HttpRequest,
@@ -802,9 +743,9 @@ class ImportScanResultsView(View):
         jira_form = None
         push_all_jira_issues = False
         # Determine if jira issues should be pushed automatically
-        push_all_jira_issues = jira_helper.is_push_all_issues(engagement_or_product)
+        push_all_jira_issues = jira_services.is_push_all_issues(engagement_or_product)
         # Only return the form if the jira is enabled on this engagement or product
-        if jira_helper.get_jira_project(engagement_or_product):
+        if jira_services.get_project(engagement_or_product):
             if request.method == "POST":
                 jira_form = JIRAImportScanForm(
                     request.POST,
@@ -871,8 +812,6 @@ class ImportScanResultsView(View):
             endpoints=endpoints,
             api_scan_configuration=Product_API_Scan_Configuration.objects.filter(product__id=product_tab.product.id),
         )
-        # Get the credential mapping form
-        cred_form = self.get_credential_form(request, engagement)
         # Get the jira form
         jira_form, push_all_jira_issues = self.get_jira_form(request, engagement_or_product)
         # Return the request and the context
@@ -887,7 +826,6 @@ class ImportScanResultsView(View):
             "engagement_or_product": engagement_or_product,
             "custom_breadcrumb": custom_breadcrumb,
             "title": "Import Scan Results",
-            "cred_form": cred_form,
             "jform": jira_form,
             "scan_types": get_scan_types_sorted(),
             "push_all_jira_issues": push_all_jira_issues,
@@ -902,7 +840,7 @@ class ImportScanResultsView(View):
         level are bubbled up to the user first before we process too much
         """
         form_validation_list = []
-        for form_name in ["form", "jform", "cred_form"]:
+        for form_name in ["form", "jform"]:
             if (form := context.get(form_name)) is not None:
                 if errors := form.errors:
                     form_validation_list.append(errors)
@@ -1069,28 +1007,6 @@ class ImportScanResultsView(View):
         context["push_to_jira"] = push_all_jira_issues or (form and form.cleaned_data.get("push_to_jira"))
         return None
 
-    def process_credentials_form(
-        self,
-        request: HttpRequest,
-        form: CredMappingForm,
-        context: dict,
-    ) -> str | None:
-        """Process the credentials form by creating"""
-        if cred_user := form.cleaned_data["cred_user"]:
-            # Select the credential mapping object from the selected list and only allow if the credential is associated with the product
-            cred_user = Cred_Mapping.objects.filter(
-                pk=cred_user.id,
-                engagement=context.get("engagement"),
-            ).first()
-            # Create the new credential mapping object
-            new_cred_mapping = form.save(commit=False)
-            new_cred_mapping.test = context.get("test")
-            new_cred_mapping.cred_id = cred_user.cred_id
-            new_cred_mapping.save()
-            # update the context
-            context["cred_user"] = cred_user
-        return None
-
     def success_redirect(
         self,
         request: HttpRequest,
@@ -1174,10 +1090,6 @@ class ImportScanResultsView(View):
         # Add test_id to pghistory context now that test is created
         if test := context.get("test"):
             pghistory.context(test_id=test.id)
-        # Process the credential form
-        if form_error := self.process_credentials_form(request, context.get("cred_form"), context):
-            add_error_message_to_response(form_error)
-            return self.failure_redirect(request, context)
         # Otherwise return the user back to the engagement (if present) or the product
         return self.success_redirect(request, context)
 
@@ -1201,7 +1113,7 @@ def unlink_jira(request, eid):
     logger.info("trying to unlink a linked jira epic from engagement %d:%s", eng.id, eng.name)
     if eng.has_jira_issue:
         try:
-            jira_helper.unlink_jira(request, eng)
+            jira_services.unlink(request, eng)
             messages.add_message(
                 request,
                 messages.SUCCESS,

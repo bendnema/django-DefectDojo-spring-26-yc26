@@ -37,7 +37,6 @@ from rest_framework.permissions import DjangoModelPermissions, IsAuthenticated
 from rest_framework.response import Response
 
 import dojo.finding.helper as finding_helper
-import dojo.jira_link.helper as jira_helper
 from dojo.api_v2 import (
     mixins as dojo_mixins,
 )
@@ -50,7 +49,6 @@ from dojo.api_v2.prefetch.prefetcher import _Prefetcher
 from dojo.authorization.authorization import user_has_permission_or_403
 from dojo.authorization.roles_permissions import Permissions
 from dojo.celery_dispatch import dojo_dispatch_task
-from dojo.cred.queries import get_authorized_cred_mappings
 from dojo.endpoint.queries import (
     get_authorized_endpoint_status,
     get_authorized_endpoints,
@@ -60,7 +58,6 @@ from dojo.engagement.queries import get_authorized_engagements
 from dojo.engagement.services import close_engagement, reopen_engagement
 from dojo.filters import (
     ApiAppAnalysisFilter,
-    ApiCredentialsFilter,
     ApiDojoMetaFilter,
     ApiEndpointFilter,
     ApiEngagementFilter,
@@ -76,7 +73,6 @@ from dojo.filters import (
 )
 from dojo.finding.queries import (
     get_authorized_findings,
-    get_authorized_stub_findings,
 )
 from dojo.finding.views import (
     duplicate_cluster,
@@ -88,20 +84,13 @@ from dojo.group.queries import (
     get_authorized_groups,
 )
 from dojo.importers.auto_create_context import AutoCreateContextManager
-from dojo.jira_link.queries import (
-    get_authorized_jira_issues,
-    get_authorized_jira_projects,
-)
+from dojo.jira import services as jira_services
 from dojo.labels import get_labels
 from dojo.models import (
     Announcement,
-    Answer,
-    Answered_Survey,
     App_Analysis,
     BurpRawRequestResponse,
     Check_List,
-    Cred_Mapping,
-    Cred_User,
     Development_Environment,
     Dojo_Group,
     Dojo_Group_Member,
@@ -111,23 +100,16 @@ from dojo.models import (
     Endpoint_Status,
     Engagement,
     Engagement_Presets,
-    Engagement_Survey,
     FileUpload,
     Finding,
     Finding_Template,
-    General_Survey,
     Global_Role,
-    JIRA_Instance,
-    JIRA_Issue,
-    JIRA_Project,
     Language_Type,
     Languages,
     Network_Locations,
     Note_Type,
     NoteHistory,
     Notes,
-    Notification_Webhooks,
-    Notifications,
     Product,
     Product_API_Scan_Configuration,
     Product_Group,
@@ -135,14 +117,12 @@ from dojo.models import (
     Product_Type,
     Product_Type_Group,
     Product_Type_Member,
-    Question,
     Regulation,
     Risk_Acceptance,
     Role,
     SLA_Configuration,
     Sonarqube_Issue,
     Sonarqube_Issue_Transition,
-    Stub_Finding,
     System_Settings,
     Test,
     Test_Import,
@@ -720,15 +700,18 @@ class EngagementViewSet(
     def update_jira_epic(self, request, pk=None):
         engagement = self.get_object()
         try:
-
             if engagement.has_jira_issue:
-                dojo_dispatch_task(jira_helper.update_epic, engagement.id, **request.data)
+                task = jira_services.get_epic_task("update_epic")
+                if task:
+                    dojo_dispatch_task(task, engagement.id, **request.data)
                 response = Response(
                     {"info": "Jira Epic update query sent"},
                     status=status.HTTP_200_OK,
                 )
             else:
-                dojo_dispatch_task(jira_helper.add_epic, engagement.id, **request.data)
+                task = jira_services.get_epic_task("add_epic")
+                if task:
+                    dojo_dispatch_task(task, engagement.id, **request.data)
                 response = Response(
                     {"info": "Jira Epic create query sent"},
                     status=status.HTTP_200_OK,
@@ -885,130 +868,6 @@ class AppAnalysisViewSet(
         return get_authorized_app_analysis(Permissions.Product_View)
 
 
-# Authorization: object-based
-@extend_schema_view(**schema_with_prefetch())
-class CredentialsViewSet(
-    PrefetchDojoModelViewSet,
-    DeprecationNoticeMixin,
-):
-    deprecated = True
-    end_of_life_date = datetime(2026, 6, 1)
-    serializer_class = serializers.CredentialSerializer
-    queryset = Cred_User.objects.all()
-    filter_backends = (DjangoFilterBackend,)
-    permission_classes = (permissions.IsSuperUser, DjangoModelPermissions)
-
-    def get_queryset(self):
-        return Cred_User.objects.all().order_by("id")
-
-    @extend_schema(
-        deprecated=True,
-        description="This endpoint is deprecated and will be removed on 2026-06-01.",
-    )
-    def list(self, request, *args, **kwargs):
-        return super().list(request, *args, **kwargs)
-
-    @extend_schema(
-        deprecated=True,
-        description="This endpoint is deprecated and will be removed on 2026-06-01.",
-    )
-    def retrieve(self, request, *args, **kwargs):
-        return super().retrieve(request, *args, **kwargs)
-
-    @extend_schema(
-        deprecated=True,
-        description="This endpoint is deprecated and will be removed on 2026-06-01.",
-    )
-    def create(self, request, *args, **kwargs):
-        return super().create(request, *args, **kwargs)
-
-    @extend_schema(
-        deprecated=True,
-        description="This endpoint is deprecated and will be removed on 2026-06-01.",
-    )
-    def update(self, request, *args, **kwargs):
-        return super().update(request, *args, **kwargs)
-
-    @extend_schema(
-        deprecated=True,
-        description="This endpoint is deprecated and will be removed on 2026-06-01.",
-    )
-    def partial_update(self, request, *args, **kwargs):
-        return super().partial_update(request, *args, **kwargs)
-
-    @extend_schema(
-        deprecated=True,
-        description="This endpoint is deprecated and will be removed on 2026-06-01.",
-    )
-    def destroy(self, request, *args, **kwargs):
-        return super().destroy(request, *args, **kwargs)
-
-
-# Authorization: configuration
-# @extend_schema_view(**schema_with_prefetch())
-# Nested models with prefetch make the response schema too long for Swagger UI
-class CredentialsMappingViewSet(
-    PrefetchDojoModelViewSet,
-    DeprecationNoticeMixin,
-):
-    deprecated = True
-    end_of_life_date = datetime(2026, 6, 1)
-    serializer_class = serializers.CredentialMappingSerializer
-    queryset = Cred_Mapping.objects.none()
-    filter_backends = (DjangoFilterBackend,)
-    filterset_class = ApiCredentialsFilter
-
-    permission_classes = (
-        IsAuthenticated,
-        permissions.UserHasCredentialPermission,
-    )
-
-    def get_queryset(self):
-        return get_authorized_cred_mappings(Permissions.Credential_View)
-
-    @extend_schema(
-        deprecated=True,
-        description="This endpoint is deprecated and will be removed on 2026-06-01.",
-    )
-    def list(self, request, *args, **kwargs):
-        return super().list(request, *args, **kwargs)
-
-    @extend_schema(
-        deprecated=True,
-        description="This endpoint is deprecated and will be removed on 2026-06-01.",
-    )
-    def retrieve(self, request, *args, **kwargs):
-        return super().retrieve(request, *args, **kwargs)
-
-    @extend_schema(
-        deprecated=True,
-        description="This endpoint is deprecated and will be removed on 2026-06-01.",
-    )
-    def create(self, request, *args, **kwargs):
-        return super().create(request, *args, **kwargs)
-
-    @extend_schema(
-        deprecated=True,
-        description="This endpoint is deprecated and will be removed on 2026-06-01.",
-    )
-    def update(self, request, *args, **kwargs):
-        return super().update(request, *args, **kwargs)
-
-    @extend_schema(
-        deprecated=True,
-        description="This endpoint is deprecated and will be removed on 2026-06-01.",
-    )
-    def partial_update(self, request, *args, **kwargs):
-        return super().partial_update(request, *args, **kwargs)
-
-    @extend_schema(
-        deprecated=True,
-        description="This endpoint is deprecated and will be removed on 2026-06-01.",
-    )
-    def destroy(self, request, *args, **kwargs):
-        return super().destroy(request, *args, **kwargs)
-
-
 # Authorization: configuration
 class FindingTemplatesViewSet(
     DojoModelViewSet,
@@ -1088,7 +947,7 @@ class FindingViewSet(
     def perform_update(self, serializer):
         # IF JIRA is enabled and this product has a JIRA configuration
         push_to_jira = serializer.validated_data.get("push_to_jira")
-        jira_project = jira_helper.get_jira_project(serializer.instance)
+        jira_project = jira_services.get_project(serializer.instance)
         if get_system_setting("enable_jira") and jira_project:
             push_to_jira = push_to_jira or jira_project.push_all_issues
 
@@ -1361,9 +1220,9 @@ class FindingViewSet(
             )
 
             if finding.has_jira_issue:
-                jira_helper.add_comment(finding, note)
+                jira_services.add_comment(finding, note)
             elif finding.has_jira_group_issue:
-                jira_helper.add_comment(finding.finding_group, note)
+                jira_services.add_comment(finding.finding_group, note)
 
             serialized_note = serializers.NoteSerializer(
                 {"author": author, "entry": entry, "private": private},
@@ -1769,74 +1628,11 @@ class FindingViewSet(
 
 
 # Authorization: configuration
-class JiraInstanceViewSet(
-    DojoModelViewSet,
-):
-    serializer_class = serializers.JIRAInstanceSerializer
-    queryset = JIRA_Instance.objects.none()
-    filter_backends = (DjangoFilterBackend,)
-    filterset_fields = ["id", "url"]
-    permission_classes = (permissions.UserHasConfigurationPermissionSuperuser,)
-
-    def get_queryset(self):
-        return JIRA_Instance.objects.all().order_by("id")
-
-
-# Authorization: object-based
-# @extend_schema_view(**schema_with_prefetch())
-# Nested models with prefetch make the response schema too long for Swagger UI
-class JiraIssuesViewSet(
-    PrefetchDojoModelViewSet,
-):
-    serializer_class = serializers.JIRAIssueSerializer
-    queryset = JIRA_Issue.objects.none()
-    filter_backends = (DjangoFilterBackend,)
-    filterset_fields = [
-        "id",
-        "jira_id",
-        "jira_key",
-        "finding",
-        "engagement",
-        "finding_group",
-    ]
-
-    permission_classes = (
-        IsAuthenticated,
-        permissions.UserHasJiraIssuePermission,
-    )
-
-    def get_queryset(self):
-        return get_authorized_jira_issues(Permissions.Product_View)
-
-
-# Authorization: object-based
-@extend_schema_view(**schema_with_prefetch())
-class JiraProjectViewSet(
-    PrefetchDojoModelViewSet,
-):
-    serializer_class = serializers.JIRAProjectSerializer
-    queryset = JIRA_Project.objects.none()
-    filter_backends = (DjangoFilterBackend,)
-    filterset_fields = [
-        "id",
-        "jira_instance",
-        "product",
-        "engagement",
-        "enabled",
-        "component",
-        "project_key",
-        "push_all_issues",
-        "enable_engagement_epic_mapping",
-        "push_notes",
-    ]
-
-    permission_classes = (
-        IsAuthenticated,
-        permissions.UserHasJiraProductPermission,
-    )
-
-    def get_queryset(self):
-        return get_authorized_jira_projects(Permissions.Product_View)
+from dojo.jira.api.views import (  # noqa: E402, F401 backward compat
+    JiraInstanceViewSet,
+    JiraIssuesViewSet,
+    JiraProjectViewSet,
+)
 
 
 # Authorization: superuser
@@ -2285,77 +2081,6 @@ class ProductTypeGroupViewSet(
         # Object authorization won't work if not all data is provided
         response = {"message": "Patch function is not offered in this path."}
         return Response(response, status=status.HTTP_405_METHOD_NOT_ALLOWED)
-
-
-# Authorization: object-based
-# @extend_schema_view(**schema_with_prefetch())
-# Nested models with prefetch make the response schema too long for Swagger UI
-class StubFindingsViewSet(
-    PrefetchDojoModelViewSet,
-    DeprecationNoticeMixin,
-):
-    deprecated = True
-    end_of_life_date = datetime(2026, 6, 1)
-    serializer_class = serializers.StubFindingSerializer
-    queryset = Stub_Finding.objects.none()
-    filter_backends = (DjangoFilterBackend,)
-    filterset_fields = ["id", "title", "date", "severity", "description"]
-    permission_classes = (
-        IsAuthenticated,
-        permissions.UserHasFindingPermission,
-    )
-
-    def get_queryset(self):
-        return get_authorized_stub_findings(
-            Permissions.Finding_View,
-        ).distinct()
-
-    def get_serializer_class(self):
-        if self.request and self.request.method == "POST":
-            return serializers.StubFindingCreateSerializer
-        return serializers.StubFindingSerializer
-
-    @extend_schema(
-        deprecated=True,
-        description="This endpoint is deprecated and will be removed on 2026-06-01.",
-    )
-    def list(self, request, *args, **kwargs):
-        return super().list(request, *args, **kwargs)
-
-    @extend_schema(
-        deprecated=True,
-        description="This endpoint is deprecated and will be removed on 2026-06-01.",
-    )
-    def retrieve(self, request, *args, **kwargs):
-        return super().retrieve(request, *args, **kwargs)
-
-    @extend_schema(
-        deprecated=True,
-        description="This endpoint is deprecated and will be removed on 2026-06-01.",
-    )
-    def create(self, request, *args, **kwargs):
-        return super().create(request, *args, **kwargs)
-
-    @extend_schema(
-        deprecated=True,
-        description="This endpoint is deprecated and will be removed on 2026-06-01.",
-    )
-    def update(self, request, *args, **kwargs):
-        return super().update(request, *args, **kwargs)
-
-    @extend_schema(
-        deprecated=True,
-        description="This endpoint is deprecated and will be removed on 2026-06-01.",
-    )
-    def partial_update(self, request, *args, **kwargs):
-        return super().partial_update(request, *args, **kwargs)
-
-    @extend_schema(
-        deprecated=True,
-        description="This endpoint is deprecated and will be removed on 2026-06-01.",
-    )
-    def destroy(self, request, *args, **kwargs):
-        return super().destroy(request, *args, **kwargs)
 
 
 # Authorization: authenticated, configuration
@@ -2871,7 +2596,7 @@ class ImportScanView(mixins.CreateModelMixin, viewsets.GenericViewSet):
         push_to_jira = serializer.validated_data.get("push_to_jira")
         if get_system_setting("enable_jira"):
             jira_driver = engagement or (product or None)
-            if jira_project := (jira_helper.get_jira_project(jira_driver) if jira_driver else None):
+            if jira_project := (jira_services.get_project(jira_driver) if jira_driver else None):
                 push_to_jira = push_to_jira or jira_project.push_all_issues
 
         # Add pghistory context for audit trail (adds to existing middleware context).
@@ -3029,7 +2754,7 @@ class ReImportScanView(mixins.CreateModelMixin, viewsets.GenericViewSet):
         push_to_jira = serializer.validated_data.get("push_to_jira")
         if get_system_setting("enable_jira"):
             jira_driver = test or (engagement or (product or None))
-            if jira_project := (jira_helper.get_jira_project(jira_driver) if jira_driver else None):
+            if jira_project := (jira_services.get_project(jira_driver) if jira_driver else None):
                 push_to_jira = push_to_jira or jira_project.push_all_issues
         logger.debug("push_to_jira: %s", push_to_jira)
         # Add pghistory context for audit trail (adds to existing middleware context)
@@ -3080,7 +2805,7 @@ class BurpRawRequestResponseViewSet(
     filterset_fields = ["finding"]
     permission_classes = (
         IsAuthenticated,
-        permissions.UserHasFindingRelatedObjectPermission,
+        permissions.UserHasBurpRawRequestResponsePermission,
     )
 
     def get_queryset(self):
@@ -3473,21 +3198,6 @@ class CeleryViewSet(viewsets.ViewSet):
         return Response({"purged": purged})
 
 
-# Authorization: superuser
-@extend_schema_view(**schema_with_prefetch())
-class NotificationsViewSet(
-    PrefetchDojoModelViewSet,
-):
-    serializer_class = serializers.NotificationsSerializer
-    queryset = Notifications.objects.none()
-    filter_backends = (DjangoFilterBackend,)
-    filterset_fields = ["id", "user", "product", "template"]
-    permission_classes = (permissions.IsSuperUser, DjangoModelPermissions)
-
-    def get_queryset(self):
-        return Notifications.objects.all().order_by("id")
-
-
 @extend_schema_view(**schema_with_prefetch())
 class EngagementPresetsViewset(
     PrefetchDojoModelViewSet,
@@ -3546,198 +3256,6 @@ class SLAConfigurationViewset(
         return SLA_Configuration.objects.all().order_by("id")
 
 
-class QuestionnaireQuestionViewSet(
-    viewsets.ReadOnlyModelViewSet,
-    dojo_mixins.QuestionSubClassFieldsMixin,
-    DeprecationNoticeMixin,
-):
-    deprecated = True
-    end_of_life_date = datetime(2026, 6, 1)
-    serializer_class = serializers.QuestionnaireQuestionSerializer
-    queryset = Question.objects.none()
-    filter_backends = (DjangoFilterBackend,)
-    permission_classes = (
-        permissions.UserHasEngagementRelatedObjectPermission,
-        DjangoModelPermissions,
-    )
-
-    def get_queryset(self):
-        return Question.objects.all().order_by("id")
-
-    @extend_schema(
-        deprecated=True,
-        description="This endpoint is deprecated and will be removed on 2026-06-01.",
-    )
-    def list(self, request, *args, **kwargs):
-        return super().list(request, *args, **kwargs)
-
-    @extend_schema(
-        deprecated=True,
-        description="This endpoint is deprecated and will be removed on 2026-06-01.",
-    )
-    def retrieve(self, request, *args, **kwargs):
-        return super().retrieve(request, *args, **kwargs)
-
-
-class QuestionnaireAnswerViewSet(
-    viewsets.ReadOnlyModelViewSet,
-    dojo_mixins.AnswerSubClassFieldsMixin,
-    DeprecationNoticeMixin,
-):
-    deprecated = True
-    end_of_life_date = datetime(2026, 6, 1)
-    serializer_class = serializers.QuestionnaireAnswerSerializer
-    queryset = Answer.objects.none()
-    filter_backends = (DjangoFilterBackend,)
-    permission_classes = (
-        permissions.UserHasEngagementRelatedObjectPermission,
-        DjangoModelPermissions,
-    )
-
-    def get_queryset(self):
-        return Answer.objects.all().order_by("id")
-
-    @extend_schema(
-        deprecated=True,
-        description="This endpoint is deprecated and will be removed on 2026-06-01.",
-    )
-    def list(self, request, *args, **kwargs):
-        return super().list(request, *args, **kwargs)
-
-    @extend_schema(
-        deprecated=True,
-        description="This endpoint is deprecated and will be removed on 2026-06-01.",
-    )
-    def retrieve(self, request, *args, **kwargs):
-        return super().retrieve(request, *args, **kwargs)
-
-
-class QuestionnaireGeneralSurveyViewSet(
-    viewsets.ReadOnlyModelViewSet,
-    DeprecationNoticeMixin,
-):
-    deprecated = True
-    end_of_life_date = datetime(2026, 6, 1)
-    serializer_class = serializers.QuestionnaireGeneralSurveySerializer
-    queryset = General_Survey.objects.none()
-    filter_backends = (DjangoFilterBackend,)
-    permission_classes = (
-        permissions.UserHasEngagementRelatedObjectPermission,
-        DjangoModelPermissions,
-    )
-
-    def get_queryset(self):
-        return General_Survey.objects.all().order_by("id")
-
-    @extend_schema(
-        deprecated=True,
-        description="This endpoint is deprecated and will be removed on 2026-06-01.",
-    )
-    def list(self, request, *args, **kwargs):
-        return super().list(request, *args, **kwargs)
-
-    @extend_schema(
-        deprecated=True,
-        description="This endpoint is deprecated and will be removed on 2026-06-01.",
-    )
-    def retrieve(self, request, *args, **kwargs):
-        return super().retrieve(request, *args, **kwargs)
-
-
-class QuestionnaireEngagementSurveyViewSet(
-    viewsets.ReadOnlyModelViewSet,
-    DeprecationNoticeMixin,
-):
-    deprecated = True
-    end_of_life_date = datetime(2026, 6, 1)
-    serializer_class = serializers.QuestionnaireEngagementSurveySerializer
-    queryset = Engagement_Survey.objects.none()
-    filter_backends = (DjangoFilterBackend,)
-    permission_classes = (
-        permissions.UserHasEngagementRelatedObjectPermission,
-        DjangoModelPermissions,
-    )
-
-    def get_queryset(self):
-        return Engagement_Survey.objects.all().order_by("id")
-
-    @extend_schema(
-        deprecated=True,
-        description="This endpoint is deprecated and will be removed on 2026-06-01.",
-    )
-    def list(self, request, *args, **kwargs):
-        return super().list(request, *args, **kwargs)
-
-    @extend_schema(
-        deprecated=True,
-        description="This endpoint is deprecated and will be removed on 2026-06-01.",
-    )
-    def retrieve(self, request, *args, **kwargs):
-        return super().retrieve(request, *args, **kwargs)
-
-    @extend_schema(
-        deprecated=True,
-        description="This endpoint is deprecated and will be removed on 2026-06-01.",
-        request=OpenApiTypes.NONE,
-        parameters=[
-            OpenApiParameter(
-                "engagement_id", OpenApiTypes.INT, OpenApiParameter.PATH,
-            ),
-        ],
-        responses={status.HTTP_200_OK: serializers.QuestionnaireAnsweredSurveySerializer},
-    )
-    @action(
-        detail=True, methods=["post"], url_path=r"link_engagement/(?P<engagement_id>\d+)",
-    )
-    def link_engagement(self, request, pk, engagement_id):
-        # Get the answered survey
-        engagement_survey = self.get_object()
-        # Safely get the engagement
-        engagement = get_object_or_404(Engagement.objects, pk=engagement_id)
-        # Verify the user has permission to edit the engagement
-        user_has_permission_or_403(request.user, engagement, Permissions.Engagement_Edit)
-        # Link the engagement
-        answered_survey, _ = Answered_Survey.objects.get_or_create(engagement=engagement, survey=engagement_survey)
-        # Send a favorable response
-        serialized_answered_survey = serializers.QuestionnaireAnsweredSurveySerializer(answered_survey)
-        return Response(serialized_answered_survey.data)
-
-
-@extend_schema_view(**schema_with_prefetch())
-class QuestionnaireAnsweredSurveyViewSet(
-    prefetch.PrefetchListMixin,
-    prefetch.PrefetchRetrieveMixin,
-    viewsets.ReadOnlyModelViewSet,
-    DeprecationNoticeMixin,
-):
-    deprecated = True
-    end_of_life_date = datetime(2026, 6, 1)
-    serializer_class = serializers.QuestionnaireAnsweredSurveySerializer
-    queryset = Answered_Survey.objects.none()
-    filter_backends = (DjangoFilterBackend,)
-    permission_classes = (
-        permissions.UserHasEngagementRelatedObjectPermission,
-        DjangoModelPermissions,
-    )
-
-    def get_queryset(self):
-        return Answered_Survey.objects.all().order_by("id")
-
-    @extend_schema(
-        deprecated=True,
-        description="This endpoint is deprecated and will be removed on 2026-06-01.",
-    )
-    def list(self, request, *args, **kwargs):
-        return super().list(request, *args, **kwargs)
-
-    @extend_schema(
-        deprecated=True,
-        description="This endpoint is deprecated and will be removed on 2026-06-01.",
-    )
-    def retrieve(self, request, *args, **kwargs):
-        return super().retrieve(request, *args, **kwargs)
-
-
 # Authorization: configuration
 class AnnouncementViewSet(
     DojoModelViewSet,
@@ -3750,13 +3268,3 @@ class AnnouncementViewSet(
 
     def get_queryset(self):
         return Announcement.objects.all().order_by("id")
-
-
-class NotificationWebhooksViewSet(
-    PrefetchDojoModelViewSet,
-):
-    serializer_class = serializers.NotificationWebhooksSerializer
-    queryset = Notification_Webhooks.objects.all()
-    filter_backends = (DjangoFilterBackend,)
-    filterset_fields = "__all__"
-    permission_classes = (permissions.IsSuperUser, DjangoModelPermissions)  # TODO: add permission also for other users

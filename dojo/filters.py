@@ -6,12 +6,11 @@ from datetime import datetime, timedelta
 
 import six
 import tagulous
-from auditlog.models import LogEntry
 from django import forms
 from django.apps import apps
 from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
-from django.db.models import Count, JSONField, Q
+from django.db.models import Count, Q
 from django.forms import HiddenInput
 from django.utils.timezone import now, tzinfo
 from django.utils.translation import gettext_lazy as _
@@ -63,7 +62,6 @@ from dojo.models import (
     SEVERITY_CHOICES,
     App_Analysis,
     ChoiceQuestion,
-    Cred_Mapping,
     Development_Environment,
     Dojo_Group,
     Dojo_User,
@@ -1625,6 +1623,7 @@ class ApiFindingFilter(DojoFilter):
     verified = BooleanFilter(field_name="verified")
     has_jira = BooleanFilter(field_name="jira_issue", lookup_expr="isnull", exclude=True)
     fix_available = BooleanFilter(field_name="fix_available")
+    mitigation_available = BooleanFilter(method="filter_mitigation_available", label="Mitigation Available")
     # CharFilter
     component_version = CharFilter(lookup_expr="icontains")
     component_name = CharFilter(lookup_expr="icontains")
@@ -1797,6 +1796,11 @@ class ApiFindingFilter(DojoFilter):
 
         return queryset.filter(mitigated=value)
 
+    def filter_mitigation_available(self, queryset, name, value):
+        if value:
+            return queryset.exclude(mitigation__isnull=True).exclude(mitigation__exact="")
+        return queryset.filter(Q(mitigation__isnull=True) | Q(mitigation__exact=""))
+
 
 class PercentageFilter(NumberFilter):
     def __init__(self, *args, **kwargs):
@@ -1831,6 +1835,8 @@ class FindingFilterHelper(FilterSet):
     duplicate = ReportBooleanFilter()
     is_mitigated = ReportBooleanFilter()
     fix_available = ReportBooleanFilter()
+    mitigation = CharFilter(lookup_expr="icontains")
+    mitigation_available = BooleanFilter(method="filter_mitigation_available", label="Mitigation Available")
     mitigated = DateRangeFilter(field_name="mitigated", label="Mitigated Date")
     mitigated_on = DateTimeFilter(field_name="mitigated", lookup_expr="exact", label="Mitigated On", method="filter_mitigated_on")
     mitigated_before = DateTimeFilter(field_name="mitigated", lookup_expr="lt", label="Mitigated Before")
@@ -1959,6 +1965,7 @@ class FindingFilterHelper(FilterSet):
              "risk_acceptance__created__date"),
             ("last_reviewed", "last_reviewed"),
             ("planned_remediation_date", "planned_remediation_date"),
+            ("planned_remediation_version", "planned_remediation_version"),
             ("title", "title"),
             ("test__engagement__product__name",
              "test__engagement__product__name"),
@@ -1985,6 +1992,7 @@ class FindingFilterHelper(FilterSet):
             "kev_date": "Date added to KEV",
             "sla_age_days": "SLA age (days)",
             "planned_remediation_date": "Planned Remediation",
+            "planned_remediation_version": "Planned remediation version",
         },
     )
 
@@ -2019,6 +2027,11 @@ class FindingFilterHelper(FilterSet):
             return queryset.filter(mitigated__gte=value, mitigated__lt=nextday)
 
         return queryset.filter(mitigated=value)
+
+    def filter_mitigation_available(self, queryset, name, value):
+        if value:
+            return queryset.exclude(mitigation__isnull=True).exclude(mitigation__exact="")
+        return queryset.filter(Q(mitigation__isnull=True) | Q(mitigation__exact=""))
 
 
 def get_finding_group_queryset_for_context(pid=None, eid=None, tid=None):
@@ -3126,21 +3139,38 @@ class ApiEndpointFilter(DojoFilter):
 
 
 class ApiRiskAcceptanceFilter(DojoFilter):
+    created = DateRangeFilter()
+    updated = DateRangeFilter()
+
     o = OrderingFilter(
         # tuple-mapping retains order
         fields=(
             ("name", "name"),
+            ("created", "created"),
+            ("updated", "updated"),
         ),
     )
 
     class Meta:
         model = Risk_Acceptance
-        fields = [
-            "name", "accepted_findings", "recommendation", "recommendation_details",
-            "decision", "decision_details", "accepted_by", "owner", "expiration_date",
-            "expiration_date_warned", "expiration_date_handled", "reactivate_expired",
-            "restart_sla_expired", "notes",
-        ]
+        fields = {
+            "name": ["exact", "icontains"],
+            "accepted_findings": ["exact"],
+            "recommendation": ["exact"],
+            "recommendation_details": ["exact", "icontains"],
+            "decision": ["exact"],
+            "decision_details": ["exact", "icontains"],
+            "accepted_by": ["exact", "icontains"],
+            "owner": ["exact"],
+            "expiration_date": ["exact", "gt", "lt", "gte", "lte"],
+            "expiration_date_warned": ["exact", "gt", "lt", "gte", "lte"],
+            "expiration_date_handled": ["exact", "gt", "lt", "gte", "lte"],
+            "reactivate_expired": ["exact"],
+            "restart_sla_expired": ["exact"],
+            "notes": ["exact"],
+            "created": ["exact", "gt", "lt", "gte", "lte"],
+            "updated": ["exact", "gt", "lt", "gte", "lte"],
+        }
 
 
 class EngagementTestFilterHelper(FilterSet):
@@ -3343,12 +3373,6 @@ class ApiAppAnalysisFilter(DojoFilter):
         fields = ["product", "name", "user", "version"]
 
 
-class ApiCredentialsFilter(DojoFilter):
-    class Meta:
-        model = Cred_Mapping
-        fields = "__all__"
-
-
 class EndpointReportFilter(DojoFilter):
     protocol = CharFilter(lookup_expr="icontains")
     userinfo = CharFilter(lookup_expr="icontains")
@@ -3399,6 +3423,7 @@ class ReportFindingFilterHelper(FilterSet):
     out_of_scope = ReportBooleanFilter()
     outside_of_sla = FindingSLAFilter(label="Outside of SLA")
     file_path = CharFilter(lookup_expr="icontains")
+    mitigation_available = BooleanFilter(method="filter_mitigation_available", label="Mitigation Available")
 
     o = OrderingFilter(
         fields=(
@@ -3420,6 +3445,11 @@ class ReportFindingFilterHelper(FilterSet):
                    "thread_id", "notes", "inherited_tags", "endpoints",
                    "numerical_severity", "reporter", "last_reviewed",
                    "jira_creation", "jira_change", "files"]
+
+    def filter_mitigation_available(self, queryset, name, value):
+        if value:
+            return queryset.exclude(mitigation__isnull=True).exclude(mitigation__exact="")
+        return queryset.filter(Q(mitigation__isnull=True) | Q(mitigation__exact=""))
 
     def manage_kwargs(self, kwargs):
         self.prod_type = None
@@ -3756,103 +3786,8 @@ class TestImportAPIFilter(DojoFilter):
         "test_import_finding_action__created"]
 
 
-class LogEntryFilter(DojoFilter):
-
-    action = MultipleChoiceFilter(choices=LogEntry.Action.choices)
-    actor = ModelMultipleChoiceFilter(queryset=Dojo_User.objects.none())
-    timestamp = DateRangeFilter()
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.form.fields["actor"].queryset = get_authorized_users(Permissions.Product_View)
-
-    class Meta:
-        model = LogEntry
-        exclude = ["content_type", "object_pk", "object_id", "object_repr",
-                   "changes", "additional_data", "remote_addr"]
-        filter_overrides = {
-            JSONField: {
-                "filter_class": CharFilter,
-                "extra": lambda _: {
-                    "lookup_expr": "icontains",
-                },
-            },
-        }
-
-
-class PgHistoryFilter(DojoFilter):
-
-    """
-    Filter for django-pghistory audit entries.
-
-    This filter works with pghistory event tables that have:
-    - pgh_created_at: timestamp of the event
-    - pgh_label: event type (insert/update/delete)
-    - user: user ID from context
-    - url: URL from context
-    - remote_addr: IP address from context
-    """
-
-    # Filter by event creation time (equivalent to auditlog timestamp)
-    pgh_created_at = DateRangeFilter(field_name="pgh_created_at", label="Timestamp")
-
-    # Filter by event type/label
-    pgh_label = ChoiceFilter(
-        field_name="pgh_label",
-        label="Event Type",
-        choices=[
-            ("", "All"),
-            ("insert", "Insert"),
-            ("update", "Update"),
-            ("delete", "Delete"),
-            ("initial_backfill", "Initial Backfill"),
-        ],
-    )
-
-    # Filter by user (from context)
-    user = ModelChoiceFilter(
-        field_name="user",
-        queryset=Dojo_User.objects.none(),
-        label="User",
-        empty_label="All Users",
-    )
-
-    # Filter by IP address (from context)
-    remote_addr = CharFilter(
-        field_name="remote_addr",
-        lookup_expr="icontains",
-        label="IP Address Contains",
-    )
-
-    # Filter by changes/diff field (JSON field containing what changed)
-    pgh_diff = CharFilter(
-        method="filter_pgh_diff_contains",
-        label="Changes Contains",
-        help_text="Search for field names or values in the changes (optimized for JSONB, but can be slow)",
-    )
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.form.fields["user"].queryset = get_authorized_users(Permissions.Product_View)
-
-    def filter_pgh_diff_contains(self, queryset, name, value):
-        """
-        Custom filter for pgh_diff that uses efficient JSONB operations.
-        Searches both keys and values in the JSONB field.
-        """
-        if not value:
-            return queryset
-
-        # Search in both keys and values using JSONB operators
-        return queryset.filter(
-            Q(pgh_diff__has_key=value) |  # Search in keys: {"severity": [...]}
-            Q(pgh_diff__has_any_keys=[value]) |  # Alternative key search
-            Q(pgh_diff__contains=f'"{value}"'),  # Search in values: ["severity", "other"]
-        )
-
-    class Meta:
-        fields = ["pgh_created_at", "pgh_label", "user", "url", "remote_addr", "pgh_diff"]
-        exclude = []
+# LogEntryFilter and PgHistoryFilter live in dojo/auditlog/filters.py and are
+# re-exported at the bottom of this module for backward compatibility.
 
 
 class ProductTypeFilter(DojoFilter):
@@ -4015,3 +3950,6 @@ with warnings.catch_warnings(action="ignore", category=ManagerInheritanceWarning
             exclude = ["polymorphic_ctype", "created", "modified", "order"]
 
         question_set = FilterSet
+
+
+from dojo.auditlog.filters import LogEntryFilter, PgHistoryFilter  # noqa: E402, F401 -- backward compat
